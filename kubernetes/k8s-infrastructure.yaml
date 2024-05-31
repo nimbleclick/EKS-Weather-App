@@ -1,0 +1,121 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::AWS_ACCOUNT_ID:role/eks_oidc_role
+  name: secret-service-account
+  namespace: prod
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::AWS_ACCOUNT_ID:role/AmazonEKSLoadBalancerControllerRole
+  labels:
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/name: aws-load-balancer-controller
+  name: aws-load-balancer-controller
+  namespace: kube-system
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: aws-secrets
+  namespace: prod
+spec:
+  provider: aws
+  secretObjects:
+  - secretName: api-token
+    type: Opaque
+    data:
+    - objectName: api
+      key: api-key
+  parameters:
+    objects: |
+        - objectName: /python-weather-app/api-key
+          objectType: secretsmanager
+          objectAlias: api
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-app-service
+  namespace: prod
+spec:
+  selector:
+    app: python-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 5000
+  type: NodePort
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-app
+  namespace: prod
+  labels:
+    app: python-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: python-app
+  template:
+    metadata:
+      labels:
+        app: python-app
+    spec:
+      containers:
+      - env:
+          - name: API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: api-token
+                key: api-key
+        name: python-weather-app
+        image: AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/eks-python-weather-app:latest
+        ports:
+        - containerPort: 5000
+        volumeMounts:
+        - name: python-app-secrets
+          mountPath: /mnt/secrets
+          readOnly: true
+      serviceAccountName: secret-service-account
+      volumes:
+      - name: python-app-secrets
+        csi:
+          driver: secrets-store.csi.k8s.io
+          readOnly: true
+          volumeAttributes:
+            secretProviderClass: aws-secrets
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: python-app-ingress
+  namespace: prod
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: instance
+spec:
+  ingressClassName: alb
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: python-app-service
+            port:
+              number: 80
